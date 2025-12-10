@@ -30,4 +30,7 @@ public class FileShare {
 
     @CreationTimestamp
     private LocalDateTime sharedAt;
+
+    // Ngày hết hạn chia sẻ (mặc định 3 tháng từ ngày chia sẻ)
+    private LocalDateTime expiresAt;
 }

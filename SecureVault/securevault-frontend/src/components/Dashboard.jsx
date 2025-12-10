@@ -429,6 +429,7 @@ const Dashboard = () => {
                                                 <th className="py-4 px-4 font-semibold">Người sở hữu</th>
                                                 <th className="py-4 px-4 font-semibold">Kích thước</th>
                                                 <th className="py-4 px-4 font-semibold">Ngày chia sẻ</th>
+                                                <th className="py-4 px-4 font-semibold">Hết hạn</th>
                                                 <th className="py-4 px-4 rounded-r-lg font-semibold">Hành động</th>
                                             </tr>
                                         </thead>
@@ -439,6 +440,18 @@ const Dashboard = () => {
                                                     <td className="py-4 px-4 text-gray-500">{file.ownerUsername || "Không xác định"}</td>
                                                     <td className="py-4 px-4 text-gray-500">{(file.size / 1024).toFixed(2)} KB</td>
                                                     <td className="py-4 px-4 text-gray-500">{new Date(file.sharedAt || file.uploadedAt).toLocaleString()}</td>
+                                                    <td className="py-4 px-4">
+                                                        {file.expiresAt ? (
+                                                            <span className={`px-2 py-1 text-xs font-semibold rounded-full ${new Date(file.expiresAt) < new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+                                                                    ? 'bg-amber-100 text-amber-700'
+                                                                    : 'bg-emerald-100 text-emerald-700'
+                                                                }`}>
+                                                                {new Date(file.expiresAt).toLocaleDateString('vi-VN')}
+                                                            </span>
+                                                        ) : (
+                                                            <span className="text-gray-400">-</span>
+                                                        )}
+                                                    </td>
                                                     <td className="py-4 px-4">
                                                         <button
                                                             onClick={() => download(file.id, file.fileName)}

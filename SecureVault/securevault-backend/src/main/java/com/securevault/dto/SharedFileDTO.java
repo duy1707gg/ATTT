@@ -19,6 +19,7 @@ public class SharedFileDTO {
     private String status;
     private LocalDateTime uploadedAt;
     private LocalDateTime sharedAt;
+    private LocalDateTime expiresAt;
     private String ownerUsername;
     private String ownerEmail;
 }

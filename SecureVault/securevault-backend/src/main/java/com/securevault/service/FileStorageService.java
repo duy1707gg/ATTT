@@ -22,6 +22,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -37,6 +38,7 @@ public class FileStorageService {
     private final UserRepository userRepository;
     private final FileShareRepository fileShareRepository;
     private final EncryptionService encryptionService;
+    private final EmailService emailService;
 
     @Value("${securevault.app.uploadDir}")
     private String uploadDir;
@@ -44,11 +46,13 @@ public class FileStorageService {
     public FileStorageService(FileRepository fileRepository,
             UserRepository userRepository,
             FileShareRepository fileShareRepository,
-            EncryptionService encryptionService) {
+            EncryptionService encryptionService,
+            EmailService emailService) {
         this.fileRepository = fileRepository;
         this.userRepository = userRepository;
         this.fileShareRepository = fileShareRepository;
         this.encryptionService = encryptionService;
+        this.emailService = emailService;
     }
 
     /**
@@ -93,7 +97,14 @@ public class FileStorageService {
                 .status(status)
                 .build();
 
-        return fileRepository.save(fileDocument);
+        FileDocument savedFile = fileRepository.save(fileDocument);
+
+        // Gửi email thông báo cho Manager khi file chờ duyệt
+        if (status == FileStatus.PENDING) {
+            notifyManagersAboutPendingFile(savedFile.getFileName(), user.getUsername());
+        }
+
+        return savedFile;
     }
 
     /**
@@ -125,9 +136,12 @@ public class FileStorageService {
             if (userOpt.isPresent()) {
                 User user = userOpt.get();
                 if (!fileShareRepository.existsByFileIdAndSharedWithUserId(fileId, user.getId())) {
+                    // Đặt ngày hết hạn là 3 tháng kể từ ngày chia sẻ
+                    LocalDateTime expiresAt = LocalDateTime.now().plusMonths(3);
                     FileShare fileShare = FileShare.builder()
                             .file(file)
                             .sharedWithUser(user)
+                            .expiresAt(expiresAt)
                             .build();
                     fileShareRepository.save(fileShare);
                     file.getSharedWith().add(user);
@@ -140,6 +154,12 @@ public class FileStorageService {
 
         if (!successEmails.isEmpty()) {
             fileRepository.save(file);
+
+            // Gửi email thông báo cho từng người nhận
+            String sharerName = file.getOwner().getUsername();
+            for (String email : successEmails) {
+                emailService.sendFileSharedNotification(email, file.getFileName(), sharerName);
+            }
         }
 
         Map<String, Object> result = new HashMap<>();
@@ -183,11 +203,14 @@ public class FileStorageService {
     }
 
     /**
-     * Lấy danh sách file được chia sẻ với chi tiết người chia sẻ.
+     * Lấy danh sách file được chia sẻ với chi tiết người chia sẻ (chỉ lấy những
+     * file chưa hết hạn).
      */
     public List<SharedFileDTO> getSharedFilesWithDetails(Long userId) {
         User user = userRepository.findById(userId).orElseThrow();
-        List<FileShare> fileShares = fileShareRepository.findBySharedWithUser(user);
+        // Chỉ lấy những share chưa hết hạn
+        List<FileShare> fileShares = fileShareRepository.findBySharedWithUserAndExpiresAtAfter(user,
+                LocalDateTime.now());
 
         return fileShares.stream().map(fs -> {
             FileDocument file = fs.getFile();
@@ -200,6 +223,7 @@ public class FileStorageService {
                     .status(file.getStatus() != null ? file.getStatus().name() : "PENDING")
                     .uploadedAt(file.getUploadedAt())
                     .sharedAt(fs.getSharedAt())
+                    .expiresAt(fs.getExpiresAt())
                     .ownerUsername(owner != null ? owner.getUsername() : "Không xác định")
                     .ownerEmail(owner != null ? owner.getEmail() : null)
                     .build();
@@ -273,5 +297,17 @@ public class FileStorageService {
     private String extractFileExtension(String fileName) {
         int lastDot = fileName.lastIndexOf('.');
         return lastDot > 0 ? fileName.substring(lastDot + 1) : "";
+    }
+
+    /**
+     * Gửi email thông báo cho tất cả Manager khi có file chờ duyệt.
+     */
+    private void notifyManagersAboutPendingFile(String fileName, String uploaderName) {
+        List<User> managers = userRepository.findByRole(Role.ROLE_MANAGER);
+        for (User manager : managers) {
+            if (manager.getEmail() != null && !manager.getEmail().isEmpty()) {
+                emailService.sendFilePendingNotification(manager.getEmail(), fileName, uploaderName);
+            }
+        }
     }
 }
