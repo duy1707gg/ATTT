@@ -1,146 +1,120 @@
 package com.securevault.controller;
 
 import com.securevault.entity.User;
-import com.securevault.enums.Role;
-import com.securevault.repository.UserRepository;
 import com.securevault.payload.request.SignupRequest;
 import com.securevault.payload.request.UpdateProfileRequest;
 import com.securevault.payload.response.MessageResponse;
-import com.securevault.blockchain.Blockchain;
 import com.securevault.security.services.UserDetailsImpl;
+import com.securevault.service.UserService;
 import jakarta.validation.Valid;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
-import java.util.Set;
 
+/**
+ * Controller xử lý các request quản lý người dùng.
+ * Chỉ xử lý HTTP request/response, business logic nằm trong UserService.
+ */
 @RestController
 @RequestMapping("/api/users")
 public class UserController {
 
-    @Autowired
-    private UserRepository userRepository;
+    private final UserService userService;
 
-    @Autowired
-    private PasswordEncoder encoder;
+    public UserController(UserService userService) {
+        this.userService = userService;
+    }
 
-    @Autowired
-    private Blockchain blockchain;
-
-    // Admin: List all users
+    /**
+     * Lấy danh sách tất cả người dùng (Admin only).
+     */
     @GetMapping("/all")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<List<User>> getAllUsers() {
-        return ResponseEntity.ok(userRepository.findAll());
+        return ResponseEntity.ok(userService.getAllUsers());
     }
 
-    // Admin: Create new user
+    /**
+     * Tạo người dùng mới (Admin only).
+     */
     @PostMapping("/create")
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<?> createUser(@Valid @RequestBody SignupRequest signUpRequest) {
-        if (userRepository.existsByUsername(signUpRequest.getUsername())) {
-            return ResponseEntity.badRequest().body(new MessageResponse("Error: Username is already taken!"));
+    public ResponseEntity<?> createUser(@Valid @RequestBody SignupRequest request) {
+        try {
+            userService.createUser(request);
+            return ResponseEntity.ok(new MessageResponse("Tạo người dùng thành công!"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(new MessageResponse(e.getMessage()));
         }
-
-        if (userRepository.existsByEmail(signUpRequest.getEmail())) {
-            return ResponseEntity.badRequest().body(new MessageResponse("Error: Email is already in use!"));
-        }
-
-        User user = User.builder()
-                .username(signUpRequest.getUsername())
-                .email(signUpRequest.getEmail())
-                .password(encoder.encode(signUpRequest.getPassword()))
-                .fullName(signUpRequest.getFullName())
-                .phoneNumber(signUpRequest.getPhoneNumber())
-                .nationalId(signUpRequest.getNationalId())
-                .isEnabled(true)
-                .build();
-
-        // Admin can assign roles if we wanted, but for now defaulting to STAFF or based
-        // on request
-        // Re-using logic: Admin creating user might want to specify role
-        Set<String> strRoles = signUpRequest.getRole();
-        Role role = Role.ROLE_STAFF;
-
-        if (strRoles != null && !strRoles.isEmpty()) {
-            String roleName = strRoles.iterator().next();
-            switch (roleName.toLowerCase()) {
-                case "admin":
-                    role = Role.ROLE_ADMIN;
-                    break;
-                case "manager":
-                    role = Role.ROLE_MANAGER;
-                    break;
-                default:
-                    role = Role.ROLE_STAFF;
-            }
-        }
-        user.setRole(role);
-        userRepository.save(user);
-
-        blockchain.addBlock("Admin created user: " + user.getUsername());
-
-        return ResponseEntity.ok(new MessageResponse("User created successfully!"));
     }
 
-    // Admin: Delete user
+    /**
+     * Xóa người dùng (Admin only).
+     */
     @DeleteMapping("/{id}")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<?> deleteUser(@PathVariable Long id) {
-        User user = userRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("User not found"));
-
-        userRepository.delete(user);
-        blockchain.addBlock("Admin deleted user: " + user.getUsername());
-
-        return ResponseEntity.ok(new MessageResponse("User deleted successfully!"));
+        try {
+            userService.deleteUser(id);
+            return ResponseEntity.ok(new MessageResponse("Xóa người dùng thành công!"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(new MessageResponse(e.getMessage()));
+        }
     }
 
-    // Admin: Toggle status
+    /**
+     * Cập nhật trạng thái người dùng (Admin only).
+     */
     @PutMapping("/status/{id}")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<?> updateUserStatus(@PathVariable Long id, @RequestParam boolean enabled) {
-        User user = userRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("User not found"));
-
-        user.setEnabled(enabled);
-        userRepository.save(user);
-
-        return ResponseEntity.ok("User " + (enabled ? "enabled" : "disabled"));
+        try {
+            userService.updateUserStatus(id, enabled);
+            String status = enabled ? "kích hoạt" : "vô hiệu hóa";
+            return ResponseEntity.ok(new MessageResponse("Người dùng đã được " + status));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(new MessageResponse(e.getMessage()));
+        }
     }
 
-    // Authenticated User: Get Profile
+    /**
+     * Lấy thông tin profile người dùng hiện tại.
+     */
     @GetMapping("/profile")
     @PreAuthorize("isAuthenticated()")
     public ResponseEntity<?> getProfile() {
-        UserDetailsImpl userDetails = (UserDetailsImpl) SecurityContextHolder.getContext().getAuthentication()
-                .getPrincipal();
-        User user = userRepository.findById(userDetails.getId())
-                .orElseThrow(() -> new RuntimeException("User not found"));
-        return ResponseEntity.ok(user);
+        try {
+            Long userId = getCurrentUserId();
+            User user = userService.getUserById(userId);
+            return ResponseEntity.ok(user);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(new MessageResponse(e.getMessage()));
+        }
     }
 
-    // Authenticated User: Update Profile
+    /**
+     * Cập nhật profile người dùng hiện tại.
+     */
     @PutMapping("/profile")
     @PreAuthorize("isAuthenticated()")
     public ResponseEntity<?> updateProfile(@Valid @RequestBody UpdateProfileRequest request) {
-        UserDetailsImpl userDetails = (UserDetailsImpl) SecurityContextHolder.getContext().getAuthentication()
-                .getPrincipal();
-        User user = userRepository.findById(userDetails.getId())
-                .orElseThrow(() -> new RuntimeException("User not found"));
+        try {
+            Long userId = getCurrentUserId();
+            userService.updateProfile(userId, request);
+            return ResponseEntity.ok(new MessageResponse("Cập nhật thông tin thành công!"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(new MessageResponse(e.getMessage()));
+        }
+    }
 
-        user.setFullName(request.getFullName());
-        user.setPhoneNumber(request.getPhoneNumber());
-        user.setNationalId(request.getNationalId());
+    // ==================== Private Helper Methods ====================
 
-        userRepository.save(user);
-        blockchain.addBlock("User updated profile: " + user.getUsername());
-
-        return ResponseEntity.ok(new MessageResponse("Profile updated successfully!"));
+    private Long getCurrentUserId() {
+        UserDetailsImpl userDetails = (UserDetailsImpl) SecurityContextHolder.getContext()
+                .getAuthentication().getPrincipal();
+        return userDetails.getId();
     }
 }

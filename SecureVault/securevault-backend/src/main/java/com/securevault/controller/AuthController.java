@@ -1,309 +1,138 @@
 package com.securevault.controller;
 
-import com.securevault.entity.RefreshToken;
-import com.securevault.entity.User;
-import com.securevault.enums.Role;
-import com.securevault.payload.request.LoginRequest;
-import com.securevault.payload.request.RefreshTokenRequest;
 import com.securevault.payload.request.*;
 import com.securevault.payload.response.JwtResponse;
 import com.securevault.payload.response.MessageResponse;
 import com.securevault.payload.response.TokenRefreshResponse;
-import com.securevault.repository.UserRepository;
-import com.securevault.security.jwt.JwtUtils;
-import com.securevault.security.services.UserDetailsImpl;
-import com.securevault.service.EmailService;
+import com.securevault.service.AuthService;
 import com.securevault.service.RefreshTokenService;
-import com.securevault.blockchain.Blockchain;
 import jakarta.validation.Valid;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
-import java.time.LocalDateTime;
-import java.util.List;
-import java.util.Random;
-import java.util.stream.Collectors;
-
+/**
+ * Controller xử lý các request xác thực.
+ * Chỉ xử lý HTTP request/response, business logic nằm trong AuthService.
+ */
 @RestController
 @RequestMapping("/api/auth")
 public class AuthController {
-    @Autowired
-    AuthenticationManager authenticationManager;
 
-    @Autowired
-    UserRepository userRepository;
+    private final AuthService authService;
+    private final RefreshTokenService refreshTokenService;
 
-    @Autowired
-    PasswordEncoder encoder;
+    public AuthController(AuthService authService,
+            RefreshTokenService refreshTokenService) {
+        this.authService = authService;
+        this.refreshTokenService = refreshTokenService;
+    }
 
-    @Autowired
-    JwtUtils jwtUtils;
-
-    @Autowired
-    EmailService emailService;
-
-    @Autowired
-    Blockchain blockchain;
-
-    @Autowired
-    RefreshTokenService refreshTokenService;
-
-    @Value("${securevault.app.jwtExpirationMs}")
-    private Long jwtExpirationMs;
-
+    /**
+     * Đăng nhập - Bước 1: Xác thực và gửi OTP.
+     */
     @PostMapping("/signin")
-    public ResponseEntity<?> authenticateUser(@Valid @RequestBody LoginRequest loginRequest) {
-
-        Authentication authentication = authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(loginRequest.getUsername(), loginRequest.getPassword()));
-
-        // 2FA Implementation
-        UserDetailsImpl userDetails = (UserDetailsImpl) authentication.getPrincipal();
-        User user = userRepository.findById(userDetails.getId()).orElseThrow();
-
-        String otp = String.format("%06d", new Random().nextInt(999999));
-        user.setOtpCode(otp);
-        user.setOtpExpiry(LocalDateTime.now().plusMinutes(5));
-        userRepository.save(user);
-
+    public ResponseEntity<?> authenticateUser(@Valid @RequestBody LoginRequest request) {
         try {
-            emailService.sendOtpMessage(user.getEmail(), "SecureVault Login OTP", "Your OTP is: " + otp);
+            authService.initiateLogin(request.getUsername(), request.getPassword());
+            return ResponseEntity.ok(new MessageResponse("Mã OTP đã được gửi đến email của bạn."));
         } catch (Exception e) {
-            return ResponseEntity.internalServerError()
-                    .body(new MessageResponse("Error sending email: " + e.getMessage()));
+            return ResponseEntity.badRequest().body(new MessageResponse("Lỗi: " + e.getMessage()));
         }
-
-        return ResponseEntity.ok(new MessageResponse("OTP sent to your email. Please verify."));
     }
 
+    /**
+     * Đăng nhập - Bước 2: Xác thực OTP.
+     */
     @PostMapping("/verify-otp")
-    public ResponseEntity<?> verifyOtp(@Valid @RequestBody VerifyOtpRequest verifyOtpRequest) {
-        User user = userRepository.findByUsername(verifyOtpRequest.getUsername())
-                .orElseThrow(() -> new RuntimeException("User not found"));
-
-        if (user.getOtpCode() == null || user.getOtpExpiry() == null) {
-            return ResponseEntity.badRequest().body(new MessageResponse("Invalid OTP request"));
+    public ResponseEntity<?> verifyOtp(@Valid @RequestBody VerifyOtpRequest request) {
+        try {
+            JwtResponse response = authService.verifyOtpAndGenerateToken(
+                    request.getUsername(), request.getOtp());
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(new MessageResponse(e.getMessage()));
         }
-
-        if (LocalDateTime.now().isAfter(user.getOtpExpiry())) {
-            return ResponseEntity.badRequest().body(new MessageResponse("OTP expired"));
-        }
-
-        if (!user.getOtpCode().equals(verifyOtpRequest.getOtp())) {
-            return ResponseEntity.badRequest().body(new MessageResponse("Invalid OTP"));
-        }
-
-        // Clear OTP
-        user.setOtpCode(null);
-        user.setOtpExpiry(null);
-        userRepository.save(user);
-
-        // Generate Access Token
-        UserDetailsImpl userDetails = UserDetailsImpl.build(user);
-        UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(
-                userDetails, null, userDetails.getAuthorities());
-
-        SecurityContextHolder.getContext().setAuthentication(authentication);
-        String jwt = jwtUtils.generateJwtToken(authentication);
-
-        // Generate Refresh Token
-        RefreshToken refreshToken = refreshTokenService.createRefreshToken(user.getId());
-
-        List<String> roles = userDetails.getAuthorities().stream()
-                .map(item -> item.getAuthority())
-                .collect(Collectors.toList());
-
-        // Log to Blockchain
-        blockchain.addBlock("User " + user.getUsername() + " logged in via 2FA");
-
-        return ResponseEntity.ok(new JwtResponse(
-                jwt,
-                refreshToken.getToken(),
-                jwtExpirationMs,
-                userDetails.getId(),
-                userDetails.getUsername(),
-                userDetails.getEmail(),
-                roles));
     }
 
+    /**
+     * Gửi lại OTP.
+     */
     @PostMapping("/resend-otp")
     public ResponseEntity<?> resendOtp(@RequestBody ResendOtpRequest request) {
-        User user = null;
-        if (request.getUsername() != null && !request.getUsername().isEmpty()) {
-            user = userRepository.findByUsername(request.getUsername()).orElse(null);
-        } else if (request.getEmail() != null && !request.getEmail().isEmpty()) {
-            user = userRepository.findByEmail(request.getEmail()).orElse(null);
-        }
-
-        if (user == null) {
-            return ResponseEntity.badRequest().body(new MessageResponse("User not found"));
-        }
-
-        // Rate limit check simply by checking if existing OTP expiry is too far in
-        // future?
-        // Actually, let's just generate a new one. Frontend handles the UI timer.
-        // Backend could enforce time check if we stored 'lastOtpSentAt', but
-        // simplifying for now.
-
-        // Generate OTP
-        String otp = String.format("%06d", new Random().nextInt(999999));
-        user.setOtpCode(otp);
-        user.setOtpExpiry(LocalDateTime.now().plusMinutes(5));
-        userRepository.save(user);
-
-        // Send Email
         try {
-            emailService.sendOtpMessage(user.getEmail(), "SecureVault OTP Resend",
-                    "Your new OTP is: " + otp);
+            String identifier = request.getUsername() != null ? request.getUsername() : request.getEmail();
+            authService.resendOtp(identifier);
+            return ResponseEntity.ok(new MessageResponse("Mã OTP mới đã được gửi đến email của bạn."));
         } catch (Exception e) {
-            return ResponseEntity.internalServerError()
-                    .body(new MessageResponse("Error sending email: " + e.getMessage()));
+            return ResponseEntity.badRequest().body(new MessageResponse(e.getMessage()));
         }
-
-        return ResponseEntity.ok(new MessageResponse("OTP resent to your email."));
     }
 
+    /**
+     * Quên mật khẩu - Gửi OTP reset password.
+     */
     @PostMapping("/forgot-password")
     public ResponseEntity<?> forgotPassword(@Valid @RequestBody ForgotPasswordRequest request) {
-        if (!userRepository.existsByEmail(request.getEmail())) {
-            // Don't reveal if user exists or not for security, but for this demo clean
-            // feedback is better
-            // Ideally return OK even if email not found to prevent enumeration
-            return ResponseEntity.ok(new MessageResponse("If email exists, OTP has been sent."));
-        }
-
-        User user = userRepository.findByEmail(request.getEmail())
-                .orElseThrow(() -> new RuntimeException("Error: User not found."));
-
-        // Generate OTP
-        String otp = String.format("%06d", new Random().nextInt(999999));
-        user.setOtpCode(otp);
-        user.setOtpExpiry(LocalDateTime.now().plusMinutes(10)); // 10 minutes expiry for reset
-        userRepository.save(user);
-
-        // Send Email
         try {
-            emailService.sendOtpMessage(user.getEmail(), "SecureVault Password Reset OTP",
-                    "Your OTP for password reset is: " + otp);
+            authService.requestPasswordReset(request.getEmail());
+            return ResponseEntity.ok(new MessageResponse("Mã OTP đã được gửi đến email của bạn."));
         } catch (Exception e) {
-            return ResponseEntity.internalServerError()
-                    .body(new MessageResponse("Error sending email: " + e.getMessage()));
+            // Không tiết lộ email có tồn tại hay không để bảo mật
+            return ResponseEntity.ok(new MessageResponse("Nếu email tồn tại, mã OTP sẽ được gửi."));
         }
-
-        // Log to Blockchain
-        blockchain.addBlock("Password reset requested for: " + user.getUsername());
-
-        return ResponseEntity.ok(new MessageResponse("OTP sent to your email for password reset."));
     }
 
+    /**
+     * Đặt lại mật khẩu với OTP.
+     */
     @PostMapping("/reset-password")
     public ResponseEntity<?> resetPassword(@Valid @RequestBody ResetPasswordRequest request) {
-        User user = userRepository.findByEmail(request.getEmail())
-                .orElseThrow(() -> new RuntimeException("Error: User not found."));
-
-        if (user.getOtpCode() == null || user.getOtpExpiry() == null) {
-            return ResponseEntity.badRequest().body(new MessageResponse("Invalid request"));
+        try {
+            authService.resetPassword(request.getEmail(), request.getOtp(), request.getNewPassword());
+            return ResponseEntity.ok(new MessageResponse("Mật khẩu đã được thay đổi thành công!"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(new MessageResponse(e.getMessage()));
         }
-
-        if (LocalDateTime.now().isAfter(user.getOtpExpiry())) {
-            return ResponseEntity.badRequest().body(new MessageResponse("OTP expired"));
-        }
-
-        if (!user.getOtpCode().equals(request.getOtp())) {
-            return ResponseEntity.badRequest().body(new MessageResponse("Invalid OTP"));
-        }
-
-        // Update Password
-        user.setPassword(encoder.encode(request.getNewPassword()));
-        user.setOtpCode(null);
-        user.setOtpExpiry(null);
-        userRepository.save(user);
-
-        // Log to Blockchain
-        blockchain.addBlock("Password reset successful for: " + user.getUsername());
-
-        return ResponseEntity.ok(new MessageResponse("Password changed successfully! You can now login."));
     }
 
+    /**
+     * Làm mới token.
+     */
     @PostMapping("/refresh-token")
     public ResponseEntity<?> refreshToken(@Valid @RequestBody RefreshTokenRequest request) {
-        String requestRefreshToken = request.getRefreshToken();
-
-        return refreshTokenService.findByToken(requestRefreshToken)
-                .map(refreshTokenService::verifyExpiration)
-                .map(RefreshToken::getUser)
-                .map(user -> {
-                    // Generate new access token
-                    UserDetailsImpl userDetails = UserDetailsImpl.build(user);
-                    UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(
-                            userDetails, null, userDetails.getAuthorities());
-                    String token = jwtUtils.generateJwtToken(authentication);
-
-                    // Create new refresh token (rotate)
-                    RefreshToken newRefreshToken = refreshTokenService.createRefreshToken(user.getId());
-
-                    // Log to Blockchain
-                    blockchain.addBlock("User " + user.getUsername() + " refreshed access token");
-
-                    return ResponseEntity
-                            .ok(new TokenRefreshResponse(token, newRefreshToken.getToken(), jwtExpirationMs));
-                })
-                .orElseThrow(() -> new RuntimeException("Refresh token is not in database!"));
+        try {
+            TokenRefreshResponse response = refreshTokenService.refreshAccessToken(request.getRefreshToken());
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(new MessageResponse(e.getMessage()));
+        }
     }
 
+    /**
+     * Đăng xuất.
+     */
     @PostMapping("/logout")
     public ResponseEntity<?> logoutUser() {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-        if (authentication != null && authentication.getPrincipal() instanceof UserDetailsImpl) {
-            UserDetailsImpl userDetails = (UserDetailsImpl) authentication.getPrincipal();
+        if (authentication != null && authentication
+                .getPrincipal() instanceof com.securevault.security.services.UserDetailsImpl userDetails) {
             refreshTokenService.deleteByUserId(userDetails.getId());
-
-            // Log to Blockchain
-            blockchain.addBlock("User " + userDetails.getUsername() + " logged out");
         }
-
-        return ResponseEntity.ok(new MessageResponse("Log out successful!"));
+        return ResponseEntity.ok(new MessageResponse("Đăng xuất thành công!"));
     }
 
+    /**
+     * Đăng ký tài khoản mới.
+     */
     @PostMapping("/signup")
-    public ResponseEntity<?> registerUser(@Valid @RequestBody SignupRequest signUpRequest) {
-        if (userRepository.existsByUsername(signUpRequest.getUsername())) {
-            return ResponseEntity
-                    .badRequest()
-                    .body(new MessageResponse("Error: Username is already taken!"));
+    public ResponseEntity<?> registerUser(@Valid @RequestBody SignupRequest request) {
+        try {
+            authService.registerUser(request);
+            return ResponseEntity.ok(new MessageResponse("Đăng ký tài khoản thành công!"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(new MessageResponse(e.getMessage()));
         }
-
-        if (userRepository.existsByEmail(signUpRequest.getEmail())) {
-            return ResponseEntity
-                    .badRequest()
-                    .body(new MessageResponse("Error: Email is already in use!"));
-        }
-
-        // Create new user's account
-        User user = User.builder()
-                .username(signUpRequest.getUsername())
-                .email(signUpRequest.getEmail())
-                .password(encoder.encode(signUpRequest.getPassword()))
-                .fullName(signUpRequest.getFullName())
-                .phoneNumber(signUpRequest.getPhoneNumber())
-                .nationalId(signUpRequest.getNationalId())
-                .isEnabled(true)
-                .build();
-
-        // Force default role to STAFF as per new requirement
-        user.setRole(Role.ROLE_STAFF);
-        userRepository.save(user);
-
-        // Log to Blockchain
-        blockchain.addBlock("New user registered: " + user.getUsername());
-
-        return ResponseEntity.ok(new MessageResponse("User registered successfully!"));
     }
 }

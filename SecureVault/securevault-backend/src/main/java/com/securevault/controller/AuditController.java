@@ -2,7 +2,6 @@ package com.securevault.controller;
 
 import com.securevault.blockchain.Block;
 import com.securevault.blockchain.Blockchain;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
@@ -10,30 +9,43 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Controller quản lý audit log blockchain.
+ * Chỉ Admin có quyền truy cập.
+ */
 @RestController
 @RequestMapping("/api/audit")
 public class AuditController {
 
-    @Autowired
-    private Blockchain blockchain;
+    private final Blockchain blockchain;
 
+    public AuditController(Blockchain blockchain) {
+        this.blockchain = blockchain;
+    }
+
+    /**
+     * Lấy toàn bộ audit logs từ blockchain.
+     */
     @GetMapping("/logs")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<List<Block>> getAuditLogs() {
-        // Reload from database to ensure we see any manual tampering immediately
         blockchain.reloadChain();
         return ResponseEntity.ok(blockchain.getChain());
     }
 
+    /**
+     * Kiểm tra tính toàn vẹn của blockchain.
+     */
     @GetMapping("/verify")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<String> verifyChain() {
         boolean isValid = blockchain.isChainValid();
-        return ResponseEntity.ok(isValid ? "Blockchain is VALID" : "Blockchain is INVALID (Tampered)");
+        String message = isValid ? "Blockchain HỢP LỆ" : "Blockchain KHÔNG HỢP LỆ (Bị giả mạo)";
+        return ResponseEntity.ok(message);
     }
 
     /**
-     * Get detailed verification result including tampered block information
+     * Kiểm tra chi tiết blockchain, bao gồm thông tin các block bị giả mạo.
      */
     @GetMapping("/verify-details")
     @PreAuthorize("hasRole('ADMIN')")
@@ -42,7 +54,7 @@ public class AuditController {
     }
 
     /**
-     * Delete tampered block and all subsequent blocks for recovery
+     * Xóa block bị giả mạo và các block sau đó để khôi phục.
      */
     @DeleteMapping("/fix/{blockIndex}")
     @PreAuthorize("hasRole('ADMIN')")
@@ -51,7 +63,7 @@ public class AuditController {
     }
 
     /**
-     * Rebuild entire blockchain - use when all blocks are corrupted
+     * Xây dựng lại toàn bộ blockchain - sử dụng khi tất cả block bị hỏng.
      */
     @PostMapping("/rebuild")
     @PreAuthorize("hasRole('ADMIN')")

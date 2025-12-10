@@ -1,5 +1,7 @@
 package com.securevault.service;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -9,8 +11,13 @@ import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 
+/**
+ * Service sao lưu database tự động.
+ */
 @Service
 public class BackupService {
+
+    private static final Logger logger = LoggerFactory.getLogger(BackupService.class);
 
     @Value("${spring.datasource.username}")
     private String dbUsername;
@@ -18,7 +25,9 @@ public class BackupService {
     @Value("${spring.datasource.password}")
     private String dbPassword;
 
-    // Run every day at midnight
+    /**
+     * Sao lưu database mỗi ngày lúc 00:00.
+     */
     @Scheduled(cron = "0 0 0 * * ?")
     public void backupDatabase() {
         SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss");
@@ -31,29 +40,28 @@ public class BackupService {
             backupDir.mkdirs();
         }
 
-        // Command for mysqldump
-        // Note: This requires mysqldump to be in the system PATH
-        String command = String.format("mysqldump -u%s -p%s securevault -r %s",
-                dbUsername, dbPassword, backupPath);
-
-        // If password is empty, don't use -p
-        if (dbPassword == null || dbPassword.isEmpty()) {
-            command = String.format("mysqldump -u%s securevault -r %s",
-                    dbUsername, backupPath);
-        }
+        String command = buildMysqldumpCommand(backupPath);
 
         try {
             ProcessBuilder pb = new ProcessBuilder(command.split(" "));
             pb.redirectErrorStream(true);
             Process process = pb.start();
             int exitCode = process.waitFor();
+
             if (exitCode == 0) {
-                System.out.println("Database backup created successfully: " + backupPath);
+                logger.info("Sao lưu database thành công: {}", backupPath);
             } else {
-                System.err.println("Database backup failed. Exit code: " + exitCode);
+                logger.error("Sao lưu database thất bại. Exit code: {}", exitCode);
             }
         } catch (IOException | InterruptedException e) {
-            e.printStackTrace();
+            logger.error("Lỗi sao lưu database: {}", e.getMessage());
         }
+    }
+
+    private String buildMysqldumpCommand(String backupPath) {
+        if (dbPassword == null || dbPassword.isEmpty()) {
+            return String.format("mysqldump -u%s securevault -r %s", dbUsername, backupPath);
+        }
+        return String.format("mysqldump -u%s -p%s securevault -r %s", dbUsername, dbPassword, backupPath);
     }
 }

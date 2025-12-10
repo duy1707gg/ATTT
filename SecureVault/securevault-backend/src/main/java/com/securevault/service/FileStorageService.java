@@ -1,20 +1,20 @@
 package com.securevault.service;
 
+import com.securevault.dto.PendingFileDTO;
 import com.securevault.dto.SharedFileDTO;
 import com.securevault.entity.FileDocument;
 import com.securevault.entity.FileShare;
 import com.securevault.entity.User;
+import com.securevault.enums.FileStatus;
+import com.securevault.enums.Role;
 import com.securevault.repository.FileRepository;
 import com.securevault.repository.FileShareRepository;
 import com.securevault.repository.UserRepository;
-
-import jakarta.transaction.Transactional;
-
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.UrlResource;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -22,42 +22,45 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
 import java.util.stream.Collectors;
 
+/**
+ * Service xử lý lưu trữ và quản lý file.
+ * Bao gồm: upload, download, chia sẻ, duyệt file.
+ */
 @Service
 @Transactional
 public class FileStorageService {
 
+    private final FileRepository fileRepository;
+    private final UserRepository userRepository;
+    private final FileShareRepository fileShareRepository;
+    private final EncryptionService encryptionService;
+
     @Value("${securevault.app.uploadDir}")
     private String uploadDir;
 
-    @Autowired
-    private FileRepository fileRepository;
+    public FileStorageService(FileRepository fileRepository,
+            UserRepository userRepository,
+            FileShareRepository fileShareRepository,
+            EncryptionService encryptionService) {
+        this.fileRepository = fileRepository;
+        this.userRepository = userRepository;
+        this.fileShareRepository = fileShareRepository;
+        this.encryptionService = encryptionService;
+    }
 
-    @Autowired
-    private UserRepository userRepository;
-
-    @Autowired
-    private FileShareRepository fileShareRepository;
-
-    @Autowired
-    private EncryptionService encryptionService;
-
+    /**
+     * Lưu file mới với mã hóa AES-GCM.
+     */
     public FileDocument storeFile(MultipartFile file, Long userId) throws Exception {
-        User user = userRepository.findById(userId).orElseThrow(() -> new RuntimeException("User not found"));
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new RuntimeException("Không tìm thấy người dùng"));
 
-        // Normalize file name
-        String originalFileName = StringUtils.cleanPath(file.getOriginalFilename());
-        String fileExtension = "";
-        int i = originalFileName.lastIndexOf('.');
-        if (i > 0) {
-            fileExtension = originalFileName.substring(i + 1);
-        }
-
-        // Generate unique file name for storage
-        String storageFileName = UUID.randomUUID().toString() + (fileExtension.isEmpty() ? "" : "." + fileExtension);
+        String originalFileName = StringUtils.cleanPath(Objects.requireNonNull(file.getOriginalFilename()));
+        String fileExtension = extractFileExtension(originalFileName);
+        String storageFileName = UUID.randomUUID() + (fileExtension.isEmpty() ? "" : "." + fileExtension);
 
         Path uploadPath = Paths.get(uploadDir);
         if (!Files.exists(uploadPath)) {
@@ -65,23 +68,20 @@ public class FileStorageService {
         }
 
         Path filePath = uploadPath.resolve(storageFileName);
-
-        // Save temp file
         Path tempPath = uploadPath.resolve("temp_" + storageFileName);
+
+        // Lưu file tạm
         Files.copy(file.getInputStream(), tempPath, StandardCopyOption.REPLACE_EXISTING);
 
-        // Encrypt file
+        // Mã hóa file
         String iv = encryptionService.generateIv();
         encryptionService.encryptFile(tempPath, filePath, iv);
 
-        // Delete temp file
+        // Xóa file tạm
         Files.delete(tempPath);
 
-        // Set Status
-        com.securevault.enums.FileStatus status = com.securevault.enums.FileStatus.APPROVED;
-        if (user.getRole() == com.securevault.enums.Role.ROLE_STAFF) {
-            status = com.securevault.enums.FileStatus.PENDING;
-        }
+        // Xác định trạng thái dựa theo role
+        FileStatus status = (user.getRole() == Role.ROLE_STAFF) ? FileStatus.PENDING : FileStatus.APPROVED;
 
         FileDocument fileDocument = FileDocument.builder()
                 .fileName(originalFileName)
@@ -96,42 +96,40 @@ public class FileStorageService {
         return fileRepository.save(fileDocument);
     }
 
+    /**
+     * Chia sẻ file với người dùng theo username.
+     */
     public void shareFile(Long fileId, String username) {
         FileDocument file = getFile(fileId);
         User user = userRepository.findByUsername(username)
-                .orElseThrow(() -> new RuntimeException("User not found"));
+                .orElseThrow(() -> new RuntimeException("Không tìm thấy người dùng"));
 
         file.getSharedWith().add(user);
         fileRepository.save(file);
     }
 
     /**
-     * Share file with multiple users by their emails
-     * Returns a map with success count and list of not found emails
+     * Chia sẻ file với nhiều người dùng theo email.
      */
-    public java.util.Map<String, Object> shareFileWithMultipleUsers(Long fileId, java.util.List<String> emails) {
+    public Map<String, Object> shareFileWithMultipleUsers(Long fileId, List<String> emails) {
         FileDocument file = getFile(fileId);
-        java.util.List<String> successEmails = new java.util.ArrayList<>();
-        java.util.List<String> notFoundEmails = new java.util.ArrayList<>();
+        List<String> successEmails = new ArrayList<>();
+        List<String> notFoundEmails = new ArrayList<>();
 
         for (String email : emails) {
             String trimmedEmail = email.trim();
             if (trimmedEmail.isEmpty())
                 continue;
 
-            java.util.Optional<User> userOpt = userRepository.findByEmail(trimmedEmail);
+            Optional<User> userOpt = userRepository.findByEmail(trimmedEmail);
             if (userOpt.isPresent()) {
                 User user = userOpt.get();
-                // Check if already shared
                 if (!fileShareRepository.existsByFileIdAndSharedWithUserId(fileId, user.getId())) {
-                    // Create FileShare record with timestamp
                     FileShare fileShare = FileShare.builder()
                             .file(file)
                             .sharedWithUser(user)
                             .build();
                     fileShareRepository.save(fileShare);
-
-                    // Also add to legacy ManyToMany for compatibility
                     file.getSharedWith().add(user);
                 }
                 successEmails.add(trimmedEmail);
@@ -144,37 +142,48 @@ public class FileStorageService {
             fileRepository.save(file);
         }
 
-        java.util.Map<String, Object> result = new java.util.HashMap<>();
+        Map<String, Object> result = new HashMap<>();
         result.put("successCount", successEmails.size());
         result.put("successEmails", successEmails);
         result.put("notFoundEmails", notFoundEmails);
         return result;
     }
 
+    /**
+     * Duyệt hoặc từ chối file.
+     */
     public void approveFile(Long fileId, boolean approved) {
         FileDocument file = getFile(fileId);
-        file.setStatus(
-                approved ? com.securevault.enums.FileStatus.APPROVED : com.securevault.enums.FileStatus.REJECTED);
+        file.setStatus(approved ? FileStatus.APPROVED : FileStatus.REJECTED);
         fileRepository.save(file);
     }
 
+    /**
+     * Lấy thông tin file theo ID.
+     */
     public FileDocument getFile(Long fileId) {
         return fileRepository.findById(fileId)
-                .orElseThrow(() -> new RuntimeException("File not found with id " + fileId));
+                .orElseThrow(() -> new RuntimeException("Không tìm thấy file với id " + fileId));
     }
 
+    /**
+     * Lấy danh sách file của người dùng.
+     */
     public List<FileDocument> getAllFiles(Long userId) {
         User user = userRepository.findById(userId).orElseThrow();
         return fileRepository.findByOwner(user);
     }
 
+    /**
+     * Lấy danh sách file được chia sẻ với người dùng.
+     */
     public List<FileDocument> getSharedFiles(Long userId) {
         User user = userRepository.findById(userId).orElseThrow();
         return fileRepository.findBySharedWithContaining(user);
     }
 
     /**
-     * Get shared files with details including owner info and share date
+     * Lấy danh sách file được chia sẻ với chi tiết người chia sẻ.
      */
     public List<SharedFileDTO> getSharedFilesWithDetails(Long userId) {
         User user = userRepository.findById(userId).orElseThrow();
@@ -197,19 +206,22 @@ public class FileStorageService {
         }).collect(Collectors.toList());
     }
 
+    /**
+     * Lấy danh sách file chờ duyệt.
+     */
     public List<FileDocument> getPendingFiles() {
-        return fileRepository.findByStatus(com.securevault.enums.FileStatus.PENDING);
+        return fileRepository.findByStatus(FileStatus.PENDING);
     }
 
     /**
-     * Get pending files with owner details
+     * Lấy danh sách file chờ duyệt với chi tiết người tải lên.
      */
-    public List<com.securevault.dto.PendingFileDTO> getPendingFilesWithDetails() {
-        List<FileDocument> pendingFiles = fileRepository.findByStatus(com.securevault.enums.FileStatus.PENDING);
+    public List<PendingFileDTO> getPendingFilesWithDetails() {
+        List<FileDocument> pendingFiles = fileRepository.findByStatus(FileStatus.PENDING);
 
         return pendingFiles.stream().map(file -> {
             User owner = file.getOwner();
-            return com.securevault.dto.PendingFileDTO.builder()
+            return PendingFileDTO.builder()
                     .id(file.getId())
                     .fileName(file.getFileName())
                     .fileType(file.getFileType())
@@ -222,13 +234,14 @@ public class FileStorageService {
         }).collect(Collectors.toList());
     }
 
+    /**
+     * Giải mã file và trả về resource.
+     */
     public Resource loadDecryptedFileAsResource(Long fileId) throws Exception {
         FileDocument fileDocument = getFile(fileId);
         Path filePath = Paths.get(fileDocument.getEncryptedPath());
 
-        // Decrypt to temp file
-        // We need a unique temp file name
-        String tempFileName = "decrypted_" + UUID.randomUUID().toString() + "_" + fileDocument.getFileName();
+        String tempFileName = "decrypted_" + UUID.randomUUID() + "_" + fileDocument.getFileName();
         Path tempPath = Paths.get(uploadDir).resolve(tempFileName);
 
         encryptionService.decryptFile(filePath, tempPath, fileDocument.getEncryptionIv());
@@ -237,20 +250,28 @@ public class FileStorageService {
         if (resource.exists() || resource.isReadable()) {
             return resource;
         } else {
-            throw new RuntimeException("Could not read the file!");
+            throw new RuntimeException("Không thể đọc file!");
         }
     }
 
+    /**
+     * Xóa file.
+     */
     public void deleteFile(Long fileId) throws Exception {
         FileDocument fileDocument = getFile(fileId);
 
-        // Delete physical encrypted file
         Path filePath = Paths.get(fileDocument.getEncryptedPath());
         if (Files.exists(filePath)) {
             Files.delete(filePath);
         }
 
-        // Delete database record
         fileRepository.delete(fileDocument);
+    }
+
+    // ==================== Private Helper Methods ====================
+
+    private String extractFileExtension(String fileName) {
+        int lastDot = fileName.lastIndexOf('.');
+        return lastDot > 0 ? fileName.substring(lastDot + 1) : "";
     }
 }
