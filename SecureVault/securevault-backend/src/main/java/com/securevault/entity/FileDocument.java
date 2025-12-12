@@ -44,6 +44,11 @@ public class FileDocument {
     @Enumerated(EnumType.STRING)
     private com.securevault.enums.FileStatus status;
 
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "folder_id")
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private Folder folder;
+
     @ManyToMany(fetch = FetchType.LAZY)
     @JoinTable(name = "file_shares", joinColumns = @JoinColumn(name = "file_id"), inverseJoinColumns = @JoinColumn(name = "user_id"))
     @Builder.Default

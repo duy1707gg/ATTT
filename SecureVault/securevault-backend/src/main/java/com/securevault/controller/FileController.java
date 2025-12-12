@@ -57,6 +57,27 @@ public class FileController {
     }
 
     /**
+     * Upload file vào thư mục.
+     */
+    @PostMapping("/upload-to-folder")
+    public ResponseEntity<?> uploadFileToFolder(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "folderId", required = false) Long folderId) {
+        try {
+            Long userId = getCurrentUserId();
+            String username = getCurrentUsername();
+
+            FileDocument fileDocument = fileStorageService.storeFileInFolder(file, userId, folderId);
+            blockchain.addBlock("Người dùng " + username + " đã tải lên file: " + fileDocument.getFileName());
+
+            return ResponseEntity.ok("Tải file thành công: " + fileDocument.getFileName());
+        } catch (Exception e) {
+            logger.error("Lỗi tải file: {}", e.getMessage());
+            return ResponseEntity.internalServerError().body("Không thể tải file: " + e.getMessage());
+        }
+    }
+
+    /**
      * Lấy danh sách file của người dùng hiện tại.
      */
     @GetMapping("/list")
@@ -131,8 +152,23 @@ public class FileController {
     @GetMapping("/download/{id}")
     public ResponseEntity<Resource> downloadFile(@PathVariable Long id) {
         try {
+            Long userId = getCurrentUserId();
+            logger.info("Download request: fileId={}, userId={}", id, userId);
+
+            // Kiểm tra quyền truy cập: owner, file share, hoặc folder share
+            boolean hasAccess = fileStorageService.canUserAccessFile(id, userId);
+            logger.info("Access check for fileId={}: hasAccess={}", id, hasAccess);
+
+            if (!hasAccess) {
+                logger.warn("Access denied for fileId={}, userId={}", id, userId);
+                return ResponseEntity.status(403).build();
+            }
+
             FileDocument fileDocument = fileStorageService.getFile(id);
+            logger.info("Loading file: {}, path: {}", fileDocument.getFileName(), fileDocument.getEncryptedPath());
+
             Resource resource = fileStorageService.loadDecryptedFileAsResource(id);
+            logger.info("File loaded successfully: {}", fileDocument.getFileName());
 
             return ResponseEntity.ok()
                     .contentType(MediaType.parseMediaType(fileDocument.getFileType()))
@@ -140,7 +176,8 @@ public class FileController {
                             "attachment; filename=\"" + fileDocument.getFileName() + "\"")
                     .body(resource);
         } catch (Exception e) {
-            logger.error("Lỗi tải file: {}", e.getMessage());
+            logger.error("Lỗi tải file id={}: {} - {}", id, e.getClass().getSimpleName(), e.getMessage());
+            e.printStackTrace();
             return ResponseEntity.badRequest().build();
         }
     }

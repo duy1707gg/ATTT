@@ -125,4 +125,40 @@ public class EmailService {
             logger.error("Lỗi gửi email thông báo chia sẻ file đến {}: {}", to, e.getMessage());
         }
     }
+
+    /**
+     * Gửi email thông báo khi thư mục được chia sẻ.
+     */
+    public void sendFolderSharedNotification(String to, String recipientName, String folderName, String sharerName) {
+        String subject = "📁 Một thư mục đã được chia sẻ với bạn - SecureVault";
+        String message = String.format("""
+                <html>
+                <body style="font-family: Arial, sans-serif; padding: 20px;">
+                    <h2 style="color: #6366f1;">📁 Thông báo chia sẻ thư mục</h2>
+                    <p>Xin chào %s,</p>
+                    <p>Một thư mục vừa được chia sẻ với bạn trong hệ thống SecureVault:</p>
+                    <div style="background-color: #f3f4f6; padding: 15px; border-radius: 8px; margin: 15px 0;">
+                        <p><strong>Tên thư mục:</strong> %s</p>
+                        <p><strong>Người chia sẻ:</strong> %s</p>
+                    </div>
+                    <p>Vui lòng đăng nhập vào hệ thống để xem và truy cập thư mục này.</p>
+                    <br/>
+                    <p>Trân trọng,<br/>SecureVault System</p>
+                </body>
+                </html>
+                """, recipientName, folderName, sharerName);
+
+        try {
+            MimeMessage mimeMessage = mailSender.createMimeMessage();
+            MimeMessageHelper helper = new MimeMessageHelper(mimeMessage, "utf-8");
+            helper.setText(message, true);
+            helper.setTo(to);
+            helper.setSubject(subject);
+            helper.setFrom("noreply@securevault.com");
+            mailSender.send(mimeMessage);
+            logger.info("Email thông báo chia sẻ thư mục đã được gửi đến: {}", to);
+        } catch (MessagingException e) {
+            logger.error("Lỗi gửi email thông báo chia sẻ thư mục đến {}: {}", to, e.getMessage());
+        }
+    }
 }

@@ -9,7 +9,11 @@ import com.securevault.enums.FileStatus;
 import com.securevault.enums.Role;
 import com.securevault.repository.FileRepository;
 import com.securevault.repository.FileShareRepository;
+import com.securevault.repository.FolderRepository;
+import com.securevault.repository.FolderShareRepository;
 import com.securevault.repository.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.UrlResource;
@@ -34,11 +38,15 @@ import java.util.stream.Collectors;
 @Transactional
 public class FileStorageService {
 
+    private static final Logger logger = LoggerFactory.getLogger(FileStorageService.class);
+
     private final FileRepository fileRepository;
     private final UserRepository userRepository;
     private final FileShareRepository fileShareRepository;
+    private final FolderShareRepository folderShareRepository;
     private final EncryptionService encryptionService;
     private final EmailService emailService;
+    private final FolderRepository folderRepository;
 
     @Value("${securevault.app.uploadDir}")
     private String uploadDir;
@@ -46,13 +54,17 @@ public class FileStorageService {
     public FileStorageService(FileRepository fileRepository,
             UserRepository userRepository,
             FileShareRepository fileShareRepository,
+            FolderShareRepository folderShareRepository,
             EncryptionService encryptionService,
-            EmailService emailService) {
+            EmailService emailService,
+            FolderRepository folderRepository) {
         this.fileRepository = fileRepository;
         this.userRepository = userRepository;
         this.fileShareRepository = fileShareRepository;
+        this.folderShareRepository = folderShareRepository;
         this.encryptionService = encryptionService;
         this.emailService = emailService;
+        this.folderRepository = folderRepository;
     }
 
     /**
@@ -100,6 +112,60 @@ public class FileStorageService {
         FileDocument savedFile = fileRepository.save(fileDocument);
 
         // Gửi email thông báo cho Manager khi file chờ duyệt
+        if (status == FileStatus.PENDING) {
+            notifyManagersAboutPendingFile(savedFile.getFileName(), user.getUsername());
+        }
+
+        return savedFile;
+    }
+
+    /**
+     * Lưu file mới vào thư mục với mã hóa AES-GCM.
+     */
+    public FileDocument storeFileInFolder(MultipartFile file, Long userId, Long folderId) throws Exception {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new RuntimeException("Không tìm thấy người dùng"));
+
+        com.securevault.entity.Folder folder = null;
+        if (folderId != null) {
+            folder = folderRepository.findByIdAndOwner(folderId, user)
+                    .orElseThrow(() -> new RuntimeException("Không tìm thấy thư mục"));
+        }
+
+        String originalFileName = StringUtils.cleanPath(Objects.requireNonNull(file.getOriginalFilename()));
+        String fileExtension = extractFileExtension(originalFileName);
+        String storageFileName = UUID.randomUUID() + (fileExtension.isEmpty() ? "" : "." + fileExtension);
+
+        Path uploadPath = Paths.get(uploadDir);
+        if (!Files.exists(uploadPath)) {
+            Files.createDirectories(uploadPath);
+        }
+
+        Path filePath = uploadPath.resolve(storageFileName);
+        Path tempPath = uploadPath.resolve("temp_" + storageFileName);
+
+        Files.copy(file.getInputStream(), tempPath, StandardCopyOption.REPLACE_EXISTING);
+
+        String iv = encryptionService.generateIv();
+        encryptionService.encryptFile(tempPath, filePath, iv);
+
+        Files.delete(tempPath);
+
+        FileStatus status = (user.getRole() == Role.ROLE_STAFF) ? FileStatus.PENDING : FileStatus.APPROVED;
+
+        FileDocument fileDocument = FileDocument.builder()
+                .fileName(originalFileName)
+                .fileType(file.getContentType())
+                .size(file.getSize())
+                .encryptedPath(filePath.toString())
+                .owner(user)
+                .encryptionIv(iv)
+                .status(status)
+                .folder(folder)
+                .build();
+
+        FileDocument savedFile = fileRepository.save(fileDocument);
+
         if (status == FileStatus.PENDING) {
             notifyManagersAboutPendingFile(savedFile.getFileName(), user.getUsername());
         }
@@ -265,7 +331,11 @@ public class FileStorageService {
         FileDocument fileDocument = getFile(fileId);
         Path filePath = Paths.get(fileDocument.getEncryptedPath());
 
-        String tempFileName = "decrypted_" + UUID.randomUUID() + "_" + fileDocument.getFileName();
+        // Sanitize file name - extract only the base file name without path separators
+        String originalFileName = fileDocument.getFileName();
+        String sanitizedFileName = originalFileName.replace("/", "_").replace("\\", "_");
+
+        String tempFileName = "decrypted_" + UUID.randomUUID() + "_" + sanitizedFileName;
         Path tempPath = Paths.get(uploadDir).resolve(tempFileName);
 
         encryptionService.decryptFile(filePath, tempPath, fileDocument.getEncryptionIv());
@@ -309,5 +379,57 @@ public class FileStorageService {
                 emailService.sendFilePendingNotification(manager.getEmail(), fileName, uploaderName);
             }
         }
+    }
+
+    /**
+     * Kiểm tra xem user có thể truy cập file không.
+     * User có thể truy cập nếu: là owner, được chia sẻ file, hoặc được chia sẻ
+     * folder chứa file.
+     */
+    public boolean canUserAccessFile(Long fileId, Long userId) {
+        logger.info("Checking access for fileId={}, userId={}", fileId, userId);
+
+        FileDocument file = getFile(fileId);
+        logger.info("File found: {}, ownerId={}", file.getFileName(), file.getOwner().getId());
+
+        // 1. Check if user is the owner
+        if (file.getOwner().getId().equals(userId)) {
+            logger.info("Access granted: user is owner");
+            return true;
+        }
+
+        // 2. Check if file is directly shared with user (and not expired)
+        User user = userRepository.findById(userId).orElse(null);
+        if (user == null) {
+            logger.warn("User not found: userId={}", userId);
+            return false;
+        }
+
+        List<com.securevault.entity.FileShare> fileShares = fileShareRepository.findBySharedWithUserAndExpiresAtAfter(
+                user, LocalDateTime.now());
+        logger.info("Found {} active file shares for user", fileShares.size());
+
+        boolean hasFileShare = fileShares.stream().anyMatch(fs -> fs.getFile().getId().equals(fileId));
+        logger.info("Direct file share check: hasFileShare={}", hasFileShare);
+
+        if (hasFileShare) {
+            logger.info("Access granted: file is directly shared with user");
+            return true;
+        }
+
+        // 3. Check if folder containing the file is shared with user
+        if (file.getFolder() != null) {
+            logger.info("Checking folder share for folderId={}", file.getFolder().getId());
+            boolean hasFolderShare = folderShareRepository.existsByFolderIdAndSharedWithUserIdAndExpiresAtAfter(
+                    file.getFolder().getId(), userId, LocalDateTime.now());
+            logger.info("Folder share check: hasFolderShare={}", hasFolderShare);
+            if (hasFolderShare) {
+                logger.info("Access granted: folder is shared with user");
+                return true;
+            }
+        }
+
+        logger.warn("Access denied for fileId={}, userId={}", fileId, userId);
+        return false;
     }
 }

@@ -54,10 +54,18 @@ const deleteFile = (fileId) => {
     return api.delete(`/files/delete/${fileId}`);
 };
 
+const downloadFileBlob = async (fileId) => {
+    const response = await api.get(`/files/download/${fileId}`, {
+        responseType: 'blob',
+    });
+    return response.data;
+};
+
 const FileService = {
     uploadFile,
     getFiles,
     downloadFile,
+    downloadFileBlob,
     getSharedFiles,
     getPendingFiles,
     shareFile,
